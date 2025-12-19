@@ -63,8 +63,14 @@ private struct GetEventsTool {
     let dateFormatter = ISO8601DateFormatter()
     dateFormatter.formatOptions = [.withFullDate]
 
-    let startDateStr = input.fromDate ?? dateFormatter.string(from: today)
-    let endDateStr = input.toDate ?? dateFormatter.string(from: defaultEndDate)
+    let startDateInput = input.fromDate ?? dateFormatter.string(from: today)
+    let endDateInput = input.toDate ?? dateFormatter.string(from: defaultEndDate)
+
+    // Parse dates and extract components for AppleScript
+    let (startYear, startMonth, startDay) =
+      parseDateComponents(startDateInput) ?? getDateComponents(today)
+    let (endYear, endMonth, endDay) =
+      parseDateComponents(endDateInput) ?? getDateComponents(defaultEndDate)
 
     let script = """
       tell application "Calendar"
@@ -72,8 +78,21 @@ private struct GetEventsTool {
           set eventCount to 0
           set maxEvents to \(limit)
           
-          set startDate to date "\(startDateStr)"
-          set endDate to date "\(endDateStr)"
+          set startDate to current date
+          set year of startDate to \(startYear)
+          set month of startDate to \(startMonth)
+          set day of startDate to \(startDay)
+          set hours of startDate to 0
+          set minutes of startDate to 0
+          set seconds of startDate to 0
+          
+          set endDate to current date
+          set year of endDate to \(endYear)
+          set month of endDate to \(endMonth)
+          set day of endDate to \(endDay)
+          set hours of endDate to 23
+          set minutes of endDate to 59
+          set seconds of endDate to 59
           
           repeat with cal in calendars
               set calName to name of cal
@@ -151,9 +170,15 @@ private struct SearchEventsTool {
     let dateFormatter = ISO8601DateFormatter()
     dateFormatter.formatOptions = [.withFullDate]
 
-    let startDateStr = input.fromDate ?? dateFormatter.string(from: today)
-    let endDateStr = input.toDate ?? dateFormatter.string(from: defaultEndDate)
+    let startDateInput = input.fromDate ?? dateFormatter.string(from: today)
+    let endDateInput = input.toDate ?? dateFormatter.string(from: defaultEndDate)
     let searchText = escapeAppleScript(input.searchText.lowercased())
+
+    // Parse dates and extract components for AppleScript
+    let (startYear, startMonth, startDay) =
+      parseDateComponents(startDateInput) ?? getDateComponents(today)
+    let (endYear, endMonth, endDay) =
+      parseDateComponents(endDateInput) ?? getDateComponents(defaultEndDate)
 
     let script = """
       tell application "Calendar"
@@ -162,8 +187,21 @@ private struct SearchEventsTool {
           set maxEvents to \(limit)
           set searchTerm to "\(searchText)"
           
-          set startDate to date "\(startDateStr)"
-          set endDate to date "\(endDateStr)"
+          set startDate to current date
+          set year of startDate to \(startYear)
+          set month of startDate to \(startMonth)
+          set day of startDate to \(startDay)
+          set hours of startDate to 0
+          set minutes of startDate to 0
+          set seconds of startDate to 0
+          
+          set endDate to current date
+          set year of endDate to \(endYear)
+          set month of endDate to \(endMonth)
+          set day of endDate to \(endDay)
+          set hours of endDate to 23
+          set minutes of endDate to 59
+          set seconds of endDate to 59
           
           repeat with cal in calendars
               set calName to name of cal
@@ -356,6 +394,26 @@ private struct OpenEventTool {
 }
 
 // MARK: - Helper Functions
+
+private func parseDateComponents(_ dateStr: String) -> (Int, Int, Int)? {
+  // Parse ISO format date string (YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss...)
+  let cleanDate = dateStr.prefix(10)  // Get just the date part
+  let parts = cleanDate.split(separator: "-")
+  guard parts.count == 3,
+    let year = Int(parts[0]),
+    let month = Int(parts[1]),
+    let day = Int(parts[2])
+  else {
+    return nil
+  }
+  return (year, month, day)
+}
+
+private func getDateComponents(_ date: Date) -> (Int, Int, Int) {
+  let calendar = Calendar.current
+  let components = calendar.dateComponents([.year, .month, .day], from: date)
+  return (components.year ?? 2024, components.month ?? 1, components.day ?? 1)
+}
 
 private func escapeAppleScript(_ str: String) -> String {
   return
