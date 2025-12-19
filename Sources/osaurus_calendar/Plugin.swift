@@ -102,6 +102,7 @@ private struct GetEventsTool {
                   if eventCount < maxEvents then
                       set evtId to uid of evt
                       set evtTitle to summary of evt
+                      if evtTitle is missing value then set evtTitle to ""
                       set evtStart to start date of evt
                       set evtEnd to end date of evt
                       set evtAllDay to allday event of evt
@@ -109,16 +110,19 @@ private struct GetEventsTool {
                       set evtLocation to ""
                       try
                           set evtLocation to location of evt
+                          if evtLocation is missing value then set evtLocation to ""
                       end try
                       
                       set evtNotes to ""
                       try
                           set evtNotes to description of evt
+                          if evtNotes is missing value then set evtNotes to ""
                       end try
                       
                       set evtUrl to ""
                       try
                           set evtUrl to url of evt
+                          if evtUrl is missing value then set evtUrl to ""
                       end try
                       
                       set eventInfo to evtId & "|||" & evtTitle & "|||" & calName & "|||" & (evtStart as string) & "|||" & (evtEnd as string) & "|||" & evtAllDay & "|||" & evtLocation & "|||" & evtNotes & "|||" & evtUrl
@@ -210,6 +214,7 @@ private struct SearchEventsTool {
               repeat with evt in calEvents
                   if eventCount < maxEvents then
                       set evtTitle to summary of evt
+                      if evtTitle is missing value then set evtTitle to ""
                       
                       if evtTitle contains searchTerm then
                           set evtId to uid of evt
@@ -220,16 +225,19 @@ private struct SearchEventsTool {
                           set evtLocation to ""
                           try
                               set evtLocation to location of evt
+                              if evtLocation is missing value then set evtLocation to ""
                           end try
                           
                           set evtNotes to ""
                           try
                               set evtNotes to description of evt
+                              if evtNotes is missing value then set evtNotes to ""
                           end try
                           
                           set evtUrl to ""
                           try
                               set evtUrl to url of evt
+                              if evtUrl is missing value then set evtUrl to ""
                           end try
                           
                           set eventInfo to evtId & "|||" & evtTitle & "|||" & calName & "|||" & (evtStart as string) & "|||" & (evtEnd as string) & "|||" & evtAllDay & "|||" & evtLocation & "|||" & evtNotes & "|||" & evtUrl
