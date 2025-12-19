@@ -96,7 +96,7 @@ private struct GetEventsTool {
           
           repeat with cal in calendars
               set calName to name of cal
-              set calEvents to (every event of cal whose start date ≥ startDate and start date ≤ endDate)
+              set calEvents to (every event of cal whose start date is greater than or equal to startDate and start date is less than or equal to endDate)
               
               repeat with evt in calEvents
                   if eventCount < maxEvents then
@@ -209,7 +209,7 @@ private struct SearchEventsTool {
           
           repeat with cal in calendars
               set calName to name of cal
-              set calEvents to (every event of cal whose start date ≥ startDate and start date ≤ endDate)
+              set calEvents to (every event of cal whose start date is greater than or equal to startDate and start date is less than or equal to endDate)
               
               repeat with evt in calEvents
                   if eventCount < maxEvents then
@@ -330,11 +330,11 @@ private struct CreateEventTool {
           tell targetCal
               set newEvent to make new event with properties {summary:"\(title)", start date:startDate, end date:endDate, allday event:\(isAllDay)}
               
-              if "\(location)" ≠ "" then
+              if "\(location)" is not equal to "" then
                   set location of newEvent to "\(location)"
               end if
               
-              if "\(notes)" ≠ "" then
+              if "\(notes)" is not equal to "" then
                   set description of newEvent to "\(notes)"
               end if
               
