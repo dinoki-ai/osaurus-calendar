@@ -1,20 +1,29 @@
 # osaurus-calendar
 
-An Osaurus plugin for interacting with macOS Calendar.app via AppleScript. Based on [apple-mcp calendar.ts](https://github.com/supermemoryai/apple-mcp/blob/main/utils/calendar.ts).
+An Osaurus plugin for interacting with macOS Calendar.app via **EventKit** (native framework) and AppleScript (for UI control).
+
+This plugin provides fast and reliable calendar access using Apple's native `EventKit` framework for fetching, searching, and creating events. It uses AppleScript only for opening specific events in the Calendar application.
 
 ## Prerequisites
 
-**Automation permissions are required.** Grant permission in:
+**Permissions are required.** The application using this plugin (e.g., Osaurus) requires two distinct permissions:
 
-- System Preferences > Security & Privacy > Privacy > Automation
+1.  **Calendars Access** (Full Access):
 
-Add the application using this plugin (e.g., Osaurus, or your terminal if running from CLI) and enable access to **Calendar**.
+    - **Why**: Required for `get_events`, `search_events`, and `create_event` to read/write the database directly (fast).
+    - **How**: System Settings > Privacy & Security > Calendars > Toggle **ON** for your app.
+    - _Host App Requirement_: `Info.plist` must include `NSCalendarsFullAccessUsageDescription` (macOS 14+) or `NSCalendarsUsageDescription`.
+
+2.  **Automation** (Apple Events):
+    - **Why**: Required only for `open_event` to control the Calendar app UI.
+    - **How**: System Settings > Privacy & Security > Automation > Expand your app > Toggle **ON** for "Calendar".
+    - _Host App Requirement_: `Info.plist` must include `NSAppleEventsUsageDescription`.
 
 ## Tools
 
 ### `get_events`
 
-Get calendar events in a specified date range.
+Get calendar events in a specified date range using EventKit (fast).
 
 **Parameters:**
 
@@ -34,7 +43,7 @@ Get calendar events in a specified date range.
 
 ### `search_events`
 
-Search for calendar events that match the search text.
+Search for calendar events that match the search text (case-insensitive title match).
 
 **Parameters:**
 
@@ -64,7 +73,7 @@ Create a new calendar event.
 - `location` (optional): Location of the event
 - `notes` (optional): Notes/description for the event
 - `isAllDay` (optional): Whether this is an all-day event (default: false)
-- `calendarName` (optional): Name of the calendar to add the event to (default: first calendar)
+- `calendarName` (optional): Name of the calendar to add the event to (default: first available calendar)
 
 **Example:**
 
@@ -155,7 +164,3 @@ All event-related tools return events in this format:
   "eventId": "ABC123-DEF456-GHI789"
 }
 ```
-
-## Credits
-
-- [apple-mcp](https://github.com/supermemoryai/apple-mcp) by supermemoryai

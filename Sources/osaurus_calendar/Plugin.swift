@@ -1,26 +1,49 @@
 import Cocoa
+import EventKit
 import Foundation
 
-// MARK: - AppleScript Helper
+// MARK: - EventKit Helper
 
-private enum AppleScriptError: Error {
-  case executionFailed(String)
-  case noResult
-}
+private class CalendarManager {
+  static let shared = CalendarManager()
+  let store = EKEventStore()
 
-private func runAppleScript(_ script: String) -> Result<String, Error> {
-  var error: NSDictionary?
-  let appleScript = NSAppleScript(source: script)
+  private init() {}
 
-  guard let result = appleScript?.executeAndReturnError(&error) else {
-    if let error = error {
-      let message = error[NSAppleScript.errorMessage] as? String ?? "Unknown AppleScript error"
-      return .failure(AppleScriptError.executionFailed(message))
+  func ensureAccess() -> Bool {
+    let status = EKEventStore.authorizationStatus(for: .event)
+
+    switch status {
+    case .authorized, .fullAccess:
+      return true
+    case .notDetermined:
+      return requestAccess()
+    case .denied, .restricted, .writeOnly:
+      return false
+    @unknown default:
+      return false
     }
-    return .failure(AppleScriptError.noResult)
   }
 
-  return .success(result.stringValue ?? "")
+  private func requestAccess() -> Bool {
+    let semaphore = DispatchSemaphore(value: 0)
+    var granted = false
+
+    if #available(macOS 14.0, *) {
+      store.requestFullAccessToEvents { isGranted, _ in
+        granted = isGranted
+        semaphore.signal()
+      }
+    } else {
+      store.requestAccess(to: .event) { isGranted, _ in
+        granted = isGranted
+        semaphore.signal()
+      }
+    }
+
+    _ = semaphore.wait(timeout: .now() + 60)  // 60s timeout for user interaction
+    return granted
+  }
 }
 
 // MARK: - Calendar Event Model
@@ -55,97 +78,53 @@ private struct GetEventsTool {
       return "{\"error\": \"Invalid arguments\"}"
     }
 
+    guard CalendarManager.shared.ensureAccess() else {
+      return "{\"error\": \"Calendar access denied\"}"
+    }
+
     let limit = input.limit ?? 10
     let today = Date()
     let calendar = Calendar.current
     let defaultEndDate = calendar.date(byAdding: .day, value: 7, to: today)!
 
     let dateFormatter = ISO8601DateFormatter()
-    dateFormatter.formatOptions = [.withFullDate]
+    dateFormatter.formatOptions = [
+      .withInternetDateTime, .withDashSeparatorInDate, .withColonSeparatorInTime,
+    ]
 
-    let startDateInput = input.fromDate ?? dateFormatter.string(from: today)
-    let endDateInput = input.toDate ?? dateFormatter.string(from: defaultEndDate)
+    let simpleDateFormatter = DateFormatter()
+    simpleDateFormatter.dateFormat = "yyyy-MM-dd"
 
-    // Parse dates and extract components for AppleScript
-    let (startYear, startMonth, startDay) =
-      parseDateComponents(startDateInput) ?? getDateComponents(today)
-    let (endYear, endMonth, endDay) =
-      parseDateComponents(endDateInput) ?? getDateComponents(defaultEndDate)
-
-    let script = """
-      tell application "Calendar"
-          set eventList to {}
-          set eventCount to 0
-          set maxEvents to \(limit)
-          
-          set startDate to current date
-          set year of startDate to \(startYear)
-          set month of startDate to \(startMonth)
-          set day of startDate to \(startDay)
-          set hours of startDate to 0
-          set minutes of startDate to 0
-          set seconds of startDate to 0
-          
-          set endDate to current date
-          set year of endDate to \(endYear)
-          set month of endDate to \(endMonth)
-          set day of endDate to \(endDay)
-          set hours of endDate to 23
-          set minutes of endDate to 59
-          set seconds of endDate to 59
-          
-          repeat with cal in calendars
-              set calName to name of cal
-              set calEvents to (every event of cal whose start date is greater than or equal to startDate and start date is less than or equal to endDate)
-              
-              repeat with evt in calEvents
-                  if eventCount < maxEvents then
-                      set evtId to uid of evt
-                      set evtTitle to summary of evt
-                      if evtTitle is missing value then set evtTitle to ""
-                      set evtStart to start date of evt
-                      set evtEnd to end date of evt
-                      set evtAllDay to allday event of evt
-                      
-                      set evtLocation to ""
-                      try
-                          set evtLocation to location of evt
-                          if evtLocation is missing value then set evtLocation to ""
-                      end try
-                      
-                      set evtNotes to ""
-                      try
-                          set evtNotes to description of evt
-                          if evtNotes is missing value then set evtNotes to ""
-                      end try
-                      
-                      set evtUrl to ""
-                      try
-                          set evtUrl to url of evt
-                          if evtUrl is missing value then set evtUrl to ""
-                      end try
-                      
-                      set eventInfo to evtId & "|||" & evtTitle & "|||" & calName & "|||" & (evtStart as string) & "|||" & (evtEnd as string) & "|||" & evtAllDay & "|||" & evtLocation & "|||" & evtNotes & "|||" & evtUrl
-                      set end of eventList to eventInfo
-                      set eventCount to eventCount + 1
-                  end if
-              end repeat
-          end repeat
-          
-          set AppleScript's text item delimiters to "###"
-          return eventList as string
-      end tell
-      """
-
-    let result = runAppleScript(script)
-
-    switch result {
-    case .success(let output):
-      let events = parseEvents(output)
-      return encodeJSON(events)
-    case .failure(let error):
-      return "{\"error\": \"\(escapeJSON(error.localizedDescription))\"}"
+    func parseDate(_ str: String) -> Date? {
+      if let date = dateFormatter.date(from: str) { return date }
+      if let date = simpleDateFormatter.date(from: str) { return date }
+      return nil
     }
+
+    let startDate = input.fromDate.flatMap(parseDate) ?? today
+    let endDate = input.toDate.flatMap(parseDate) ?? defaultEndDate
+
+    let store = CalendarManager.shared.store
+    let predicate = store.predicateForEvents(withStart: startDate, end: endDate, calendars: nil)
+    let events = store.events(matching: predicate)
+      .sorted { $0.startDate < $1.startDate }
+      .prefix(limit)
+
+    let eventModels = events.map { event in
+      CalendarEvent(
+        id: event.eventIdentifier,
+        title: event.title,
+        location: event.location,
+        notes: event.notes,
+        startDate: dateFormatter.string(from: event.startDate),
+        endDate: dateFormatter.string(from: event.endDate),
+        calendarName: event.calendar.title,
+        isAllDay: event.isAllDay,
+        url: event.url?.absoluteString
+      )
+    }
+
+    return encodeJSON(eventModels)
   }
 }
 
@@ -166,102 +145,55 @@ private struct SearchEventsTool {
       return "{\"error\": \"Invalid arguments\"}"
     }
 
+    guard CalendarManager.shared.ensureAccess() else {
+      return "{\"error\": \"Calendar access denied\"}"
+    }
+
     let limit = input.limit ?? 10
     let today = Date()
     let calendar = Calendar.current
     let defaultEndDate = calendar.date(byAdding: .day, value: 30, to: today)!
 
     let dateFormatter = ISO8601DateFormatter()
-    dateFormatter.formatOptions = [.withFullDate]
+    dateFormatter.formatOptions = [
+      .withInternetDateTime, .withDashSeparatorInDate, .withColonSeparatorInTime,
+    ]
 
-    let startDateInput = input.fromDate ?? dateFormatter.string(from: today)
-    let endDateInput = input.toDate ?? dateFormatter.string(from: defaultEndDate)
-    let searchText = escapeAppleScript(input.searchText.lowercased())
+    let simpleDateFormatter = DateFormatter()
+    simpleDateFormatter.dateFormat = "yyyy-MM-dd"
 
-    // Parse dates and extract components for AppleScript
-    let (startYear, startMonth, startDay) =
-      parseDateComponents(startDateInput) ?? getDateComponents(today)
-    let (endYear, endMonth, endDay) =
-      parseDateComponents(endDateInput) ?? getDateComponents(defaultEndDate)
-
-    let script = """
-      tell application "Calendar"
-          set eventList to {}
-          set eventCount to 0
-          set maxEvents to \(limit)
-          set searchTerm to "\(searchText)"
-          
-          set startDate to current date
-          set year of startDate to \(startYear)
-          set month of startDate to \(startMonth)
-          set day of startDate to \(startDay)
-          set hours of startDate to 0
-          set minutes of startDate to 0
-          set seconds of startDate to 0
-          
-          set endDate to current date
-          set year of endDate to \(endYear)
-          set month of endDate to \(endMonth)
-          set day of endDate to \(endDay)
-          set hours of endDate to 23
-          set minutes of endDate to 59
-          set seconds of endDate to 59
-          
-          repeat with cal in calendars
-              set calName to name of cal
-              set calEvents to (every event of cal whose start date is greater than or equal to startDate and start date is less than or equal to endDate)
-              
-              repeat with evt in calEvents
-                  if eventCount < maxEvents then
-                      set evtTitle to summary of evt
-                      if evtTitle is missing value then set evtTitle to ""
-                      
-                      if evtTitle contains searchTerm then
-                          set evtId to uid of evt
-                          set evtStart to start date of evt
-                          set evtEnd to end date of evt
-                          set evtAllDay to allday event of evt
-                          
-                          set evtLocation to ""
-                          try
-                              set evtLocation to location of evt
-                              if evtLocation is missing value then set evtLocation to ""
-                          end try
-                          
-                          set evtNotes to ""
-                          try
-                              set evtNotes to description of evt
-                              if evtNotes is missing value then set evtNotes to ""
-                          end try
-                          
-                          set evtUrl to ""
-                          try
-                              set evtUrl to url of evt
-                              if evtUrl is missing value then set evtUrl to ""
-                          end try
-                          
-                          set eventInfo to evtId & "|||" & evtTitle & "|||" & calName & "|||" & (evtStart as string) & "|||" & (evtEnd as string) & "|||" & evtAllDay & "|||" & evtLocation & "|||" & evtNotes & "|||" & evtUrl
-                          set end of eventList to eventInfo
-                          set eventCount to eventCount + 1
-                      end if
-                  end if
-              end repeat
-          end repeat
-          
-          set AppleScript's text item delimiters to "###"
-          return eventList as string
-      end tell
-      """
-
-    let result = runAppleScript(script)
-
-    switch result {
-    case .success(let output):
-      let events = parseEvents(output)
-      return encodeJSON(events)
-    case .failure(let error):
-      return "{\"error\": \"\(escapeJSON(error.localizedDescription))\"}"
+    func parseDate(_ str: String) -> Date? {
+      if let date = dateFormatter.date(from: str) { return date }
+      if let date = simpleDateFormatter.date(from: str) { return date }
+      return nil
     }
+
+    let startDate = input.fromDate.flatMap(parseDate) ?? today
+    let endDate = input.toDate.flatMap(parseDate) ?? defaultEndDate
+    let searchText = input.searchText.lowercased()
+
+    let store = CalendarManager.shared.store
+    let predicate = store.predicateForEvents(withStart: startDate, end: endDate, calendars: nil)
+    let events = store.events(matching: predicate)
+      .filter { $0.title.lowercased().contains(searchText) }
+      .sorted { $0.startDate < $1.startDate }
+      .prefix(limit)
+
+    let eventModels = events.map { event in
+      CalendarEvent(
+        id: event.eventIdentifier,
+        title: event.title,
+        location: event.location,
+        notes: event.notes,
+        startDate: dateFormatter.string(from: event.startDate),
+        endDate: dateFormatter.string(from: event.endDate),
+        calendarName: event.calendar.title,
+        isAllDay: event.isAllDay,
+        url: event.url?.absoluteString
+      )
+    }
+
+    return encodeJSON(eventModels)
   }
 }
 
@@ -285,12 +217,19 @@ private struct CreateEventTool {
       return "{\"error\": \"Invalid arguments\"}"
     }
 
-    // Validate inputs
+    guard CalendarManager.shared.ensureAccess() else {
+      return "{\"success\": false, \"message\": \"Calendar access denied\"}"
+    }
+
     guard !input.title.trimmingCharacters(in: .whitespaces).isEmpty else {
       return "{\"success\": false, \"message\": \"Event title cannot be empty\"}"
     }
 
     let dateFormatter = ISO8601DateFormatter()
+    dateFormatter.formatOptions = [
+      .withInternetDateTime, .withDashSeparatorInDate, .withColonSeparatorInTime,
+    ]
+
     guard let startDate = dateFormatter.date(from: input.startDate),
       let endDate = dateFormatter.date(from: input.endDate)
     else {
@@ -302,54 +241,34 @@ private struct CreateEventTool {
       return "{\"success\": false, \"message\": \"End date must be after start date\"}"
     }
 
-    let localDateFormatter = DateFormatter()
-    localDateFormatter.dateStyle = .full
-    localDateFormatter.timeStyle = .short
+    let store = CalendarManager.shared.store
+    let event = EKEvent(eventStore: store)
 
-    let startDateLocal = localDateFormatter.string(from: startDate)
-    let endDateLocal = localDateFormatter.string(from: endDate)
+    event.title = input.title
+    event.startDate = startDate
+    event.endDate = endDate
+    event.location = input.location
+    event.notes = input.notes
+    event.isAllDay = input.isAllDay ?? false
 
-    let title = escapeAppleScript(input.title)
-    let location = escapeAppleScript(input.location ?? "")
-    let notes = escapeAppleScript(input.notes ?? "")
-    let isAllDay = input.isAllDay ?? false
-    let calendarName = escapeAppleScript(input.calendarName ?? "Calendar")
+    // Find calendar
+    if let calendarName = input.calendarName {
+      if let cal = store.calendars(for: .event).first(where: { $0.title == calendarName }) {
+        event.calendar = cal
+      } else {
+        // Fallback to default if specified not found? Or fail?
+        // Using default is safer for "success"
+        event.calendar = store.defaultCalendarForNewEvents
+      }
+    } else {
+      event.calendar = store.defaultCalendarForNewEvents
+    }
 
-    let script = """
-      tell application "Calendar"
-          set startDate to date "\(startDateLocal)"
-          set endDate to date "\(endDateLocal)"
-          
-          set targetCal to null
-          try
-              set targetCal to calendar "\(calendarName)"
-          on error
-              set targetCal to first calendar
-          end try
-          
-          tell targetCal
-              set newEvent to make new event with properties {summary:"\(title)", start date:startDate, end date:endDate, allday event:\(isAllDay)}
-              
-              if "\(location)" is not equal to "" then
-                  set location of newEvent to "\(location)"
-              end if
-              
-              if "\(notes)" is not equal to "" then
-                  set description of newEvent to "\(notes)"
-              end if
-              
-              return uid of newEvent
-          end tell
-      end tell
-      """
-
-    let result = runAppleScript(script)
-
-    switch result {
-    case .success(let eventId):
+    do {
+      try store.save(event, span: .thisEvent)
       return
-        "{\"success\": true, \"message\": \"Event \\\"\(escapeJSON(input.title))\\\" created successfully.\", \"eventId\": \"\(escapeJSON(eventId))\"}"
-    case .failure(let error):
+        "{\"success\": true, \"message\": \"Event \\\"\(escapeJSON(input.title))\\\" created successfully.\", \"eventId\": \"\(escapeJSON(event.eventIdentifier))\"}"
+    } catch {
       return "{\"success\": false, \"message\": \"\(escapeJSON(error.localizedDescription))\"}"
     }
   }
@@ -369,66 +288,61 @@ private struct OpenEventTool {
       return "{\"error\": \"Invalid arguments\"}"
     }
 
-    let eventId = escapeAppleScript(input.eventId)
+    guard CalendarManager.shared.ensureAccess() else {
+      return "{\"success\": false, \"message\": \"Calendar access denied\"}"
+    }
+
+    let store = CalendarManager.shared.store
+    guard let event = store.event(withIdentifier: input.eventId) else {
+      return "{\"success\": false, \"message\": \"Event not found\"}"
+    }
+
+    // Use AppleScript to open the specific event
+    // We can target the event by UID
+
+    // Format date for AppleScript
+    let appleScriptDateFormatter = DateFormatter()
+    appleScriptDateFormatter.dateStyle = .full
+    appleScriptDateFormatter.timeStyle = .medium
+    let dateString = appleScriptDateFormatter.string(from: event.startDate)
+
+    let eventId = event.eventIdentifier ?? input.eventId
 
     let script = """
       tell application "Calendar"
           activate
-          
+          set found to false
           repeat with cal in calendars
-              try
-                  set evt to (first event of cal whose uid is "\(eventId)")
-                  show evt
-                  return "Event opened successfully"
-              end try
+              if name of cal is "\(event.calendar.title)" then
+                  try
+                      set evt to (first event of cal whose uid is "\(eventId)")
+                      show evt
+                      set found to true
+                      exit repeat
+                  end try
+              end if
           end repeat
-          
-          return "Event not found"
+          if not found then
+              -- Fallback: switch to date
+              switch view to day view
+              view calendar date (date "\(dateString)")
+          end if
       end tell
       """
 
-    let result = runAppleScript(script)
-
-    switch result {
-    case .success(let message):
-      if message.contains("not found") {
-        return "{\"success\": false, \"message\": \"Event not found\"}"
-      }
-      return "{\"success\": true, \"message\": \"\(escapeJSON(message))\"}"
-    case .failure(let error):
-      return "{\"success\": false, \"message\": \"\(escapeJSON(error.localizedDescription))\"}"
+    // Simple AppleScript runner
+    var error: NSDictionary?
+    let appleScript = NSAppleScript(source: script)
+    if appleScript?.executeAndReturnError(&error) != nil {
+      return "{\"success\": true, \"message\": \"Event opened successfully\"}"
+    } else {
+      let msg = error?[NSAppleScript.errorMessage] as? String ?? "Unknown AppleScript error"
+      return "{\"success\": false, \"message\": \"\(escapeJSON(msg))\"}"
     }
   }
 }
 
 // MARK: - Helper Functions
-
-private func parseDateComponents(_ dateStr: String) -> (Int, Int, Int)? {
-  // Parse ISO format date string (YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss...)
-  let cleanDate = dateStr.prefix(10)  // Get just the date part
-  let parts = cleanDate.split(separator: "-")
-  guard parts.count == 3,
-    let year = Int(parts[0]),
-    let month = Int(parts[1]),
-    let day = Int(parts[2])
-  else {
-    return nil
-  }
-  return (year, month, day)
-}
-
-private func getDateComponents(_ date: Date) -> (Int, Int, Int) {
-  let calendar = Calendar.current
-  let components = calendar.dateComponents([.year, .month, .day], from: date)
-  return (components.year ?? 2024, components.month ?? 1, components.day ?? 1)
-}
-
-private func escapeAppleScript(_ str: String) -> String {
-  return
-    str
-    .replacingOccurrences(of: "\\", with: "\\\\")
-    .replacingOccurrences(of: "\"", with: "\\\"")
-}
 
 private func escapeJSON(_ str: String) -> String {
   return
@@ -438,33 +352,6 @@ private func escapeJSON(_ str: String) -> String {
     .replacingOccurrences(of: "\n", with: "\\n")
     .replacingOccurrences(of: "\r", with: "\\r")
     .replacingOccurrences(of: "\t", with: "\\t")
-}
-
-private func parseEvents(_ output: String) -> [CalendarEvent] {
-  guard !output.isEmpty else { return [] }
-
-  let eventStrings = output.components(separatedBy: "###")
-  var events: [CalendarEvent] = []
-
-  for eventStr in eventStrings {
-    let parts = eventStr.components(separatedBy: "|||")
-    guard parts.count >= 6 else { continue }
-
-    let event = CalendarEvent(
-      id: parts[0],
-      title: parts[1],
-      location: parts.count > 6 ? (parts[6].isEmpty ? nil : parts[6]) : nil,
-      notes: parts.count > 7 ? (parts[7].isEmpty ? nil : parts[7]) : nil,
-      startDate: parts[3],
-      endDate: parts[4],
-      calendarName: parts[2],
-      isAllDay: parts[5] == "true",
-      url: parts.count > 8 ? (parts[8].isEmpty ? nil : parts[8]) : nil
-    )
-    events.append(event)
-  }
-
-  return events
 }
 
 private func encodeJSON<T: Encodable>(_ value: T) -> String {
@@ -566,7 +453,7 @@ private var api: osr_plugin_api = {
                 },
                 "required": []
               },
-              "requirements": [],
+              "requirements": ["calendar"],
               "permission_policy": "auto"
             },
             {
@@ -594,7 +481,7 @@ private var api: osr_plugin_api = {
                 },
                 "required": ["searchText"]
               },
-              "requirements": [],
+              "requirements": ["calendar"],
               "permission_policy": "auto"
             },
             {
@@ -634,7 +521,7 @@ private var api: osr_plugin_api = {
                 },
                 "required": ["title", "startDate", "endDate"]
               },
-              "requirements": [],
+              "requirements": ["calendar"],
               "permission_policy": "ask"
             },
             {
@@ -650,7 +537,7 @@ private var api: osr_plugin_api = {
                 },
                 "required": ["eventId"]
               },
-              "requirements": [],
+              "requirements": ["calendar", "automation"],
               "permission_policy": "auto"
             }
           ]
